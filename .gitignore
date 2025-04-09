@@ -1,0 +1,24 @@
+# Ignore all files in the dataset folder
+dataset/
+
+# Ignore model files
+*.h5
+
+# Optional: Ignore model checkpoints or logs if any
+*.ckpt
+*.pb
+logs/
+checkpoints/
+
+# __pycache__ and other Python-related ignores
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Jupyter notebook checkpoints (if any)
+.ipynb_checkpoints/
+
+# VS Code settings (optional)
+.vscode/

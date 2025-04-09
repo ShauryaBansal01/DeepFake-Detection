@@ -4,24 +4,24 @@ import numpy as np
 from tqdm import tqdm
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import TimeDistributed, Conv2D, MaxPooling2D, Flatten, LSTM, Dense, Dropout
+from tensorflow.keras.layers import TimeDistributed, Conv2D, MaxPooling2D, Flatten, LSTM, Dense, Dropout, BatchNormalization, Bidirectional
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
 
 # Parameters
 FRAME_HEIGHT = 128
 FRAME_WIDTH = 128
 FRAMES_PER_VIDEO = 10
+EPOCHS = 20
+BATCH_SIZE = 4
 
 # Step 1: Get all video paths
 def get_all_video_paths():
-    base_dirs = [
-        "dataset/Celeb-DF",
-        "dataset/DFDC",
-        "dataset/FF++"
-    ]
-
-    real_paths = []
-    fake_paths = []
+    base_dirs = ["dataset/Celeb-DF", "dataset/DFDC", "dataset/FF++"]
+    real_paths, fake_paths = [], []
 
     for base in base_dirs:
         real_dir = os.path.join(base, "real")
@@ -29,13 +29,8 @@ def get_all_video_paths():
 
         if os.path.exists(real_dir):
             real_paths += [os.path.join(real_dir, f) for f in os.listdir(real_dir) if f.endswith(".mp4")]
-        else:
-            print(f"⚠️ Real dir not found: {real_dir}")
-
         if os.path.exists(fake_dir):
             fake_paths += [os.path.join(fake_dir, f) for f in os.listdir(fake_dir) if f.endswith(".mp4")]
-        else:
-            print(f"⚠️ Fake dir not found: {fake_dir}")
 
     print(f"✅ Found {len(real_paths)} real videos and {len(fake_paths)} fake videos")
     return real_paths, fake_paths
@@ -51,14 +46,13 @@ def extract_frames(video_path, num_frames=FRAMES_PER_VIDEO):
         return None
 
     interval = total_frames // num_frames
-
     for i in range(num_frames):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i * interval)
         ret, frame = cap.read()
         if not ret:
             break
         frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
-        frame = frame.astype(np.float32) / 255.0
+        frame = preprocess_input(frame.astype(np.float32))
         frames.append(frame)
 
     cap.release()
@@ -71,7 +65,6 @@ def extract_frames(video_path, num_frames=FRAMES_PER_VIDEO):
 # Step 3: Prepare dataset
 def prepare_dataset(real_paths, fake_paths):
     X, y = [], []
-
     print("\n🎞️  Processing real videos...")
     for path in tqdm(real_paths):
         frames = extract_frames(path)
@@ -86,51 +79,56 @@ def prepare_dataset(real_paths, fake_paths):
             X.append(frames)
             y.append(1)
 
-    X = np.array(X)
-    y = np.array(y)
-    print(f"\n📦 Dataset shape: {X.shape}, Labels shape: {y.shape}")
+    print("\n🧹 Cleaning data...")
+    X_cleaned, y_cleaned = [], []
+    for i in range(len(X)):
+        if X[i] is not None and X[i].shape == (FRAMES_PER_VIDEO, FRAME_HEIGHT, FRAME_WIDTH, 3):
+            X_cleaned.append(X[i])
+            y_cleaned.append(y[i])
+
+    X = np.array(X_cleaned)
+    y = np.array(y_cleaned)
+    print(f"📦 Dataset shape: {X.shape}, Labels shape: {y.shape}")
     return X, y
 
-# Step 4: Build model
+# Step 4: Build model with MobileNetV2 base and Bidirectional LSTM
 def build_model():
+    base_model = MobileNetV2(include_top=False, weights='imagenet', input_shape=(FRAME_HEIGHT, FRAME_WIDTH, 3))
+    base_model.trainable = False
+
     model = Sequential()
-    model.add(TimeDistributed(Conv2D(32, (3, 3), activation='relu'), input_shape=(FRAMES_PER_VIDEO, FRAME_HEIGHT, FRAME_WIDTH, 3)))
-    model.add(TimeDistributed(MaxPooling2D((2, 2))))
-    model.add(TimeDistributed(Conv2D(64, (3, 3), activation='relu')))
-    model.add(TimeDistributed(MaxPooling2D((2, 2))))
+    model.add(TimeDistributed(base_model, input_shape=(FRAMES_PER_VIDEO, FRAME_HEIGHT, FRAME_WIDTH, 3)))
     model.add(TimeDistributed(Flatten()))
-    model.add(LSTM(64))
+    model.add(Bidirectional(LSTM(64)))
+    model.add(BatchNormalization())
     model.add(Dropout(0.5))
     model.add(Dense(1, activation='sigmoid'))
 
-    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer=Adam(learning_rate=0.0001), loss='binary_crossentropy', metrics=['accuracy'])
     return model
 
 # Main
 if __name__ == "__main__":
     print("🚀 Starting deepfake detection training pipeline...\n")
-    print("🔍 Scanning dataset folders...")
-    real_video_paths, fake_video_paths = get_all_video_paths()
 
+    real_video_paths, fake_video_paths = get_all_video_paths()
     if not real_video_paths or not fake_video_paths:
-        print("❌ No videos found. Please check your dataset folder paths.")
+        print("❌ No videos found. Please check dataset paths.")
         exit()
 
     print("\n📦 Loading and processing video data...")
     X, y = prepare_dataset(real_video_paths, fake_video_paths)
-    print(f"\n✅ Dataset prepared: {X.shape[0]} samples, each with {FRAMES_PER_VIDEO} frames of size {FRAME_WIDTH}x{FRAME_HEIGHT}")
 
-    # Debug input
-    print(f"\n🧪 Sample input shape: {X[0].shape}")
-    print(f"🧪 Model input expected shape: ({FRAMES_PER_VIDEO}, {FRAME_HEIGHT}, {FRAME_WIDTH}, 3)")
-
+    print("\n🔀 Splitting dataset...")
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     print("\n🧠 Building model...")
     model = build_model()
 
-    print("\n🏋️‍♀️ Starting training...\n")
-    model.fit(X_train, y_train, epochs=10, batch_size=4, validation_data=(X_test, y_test))
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-6, verbose=1)
+
+    print("\n🏋️ Training model...")
+    model.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=(X_test, y_test), callbacks=[reduce_lr])
 
     print("\n✅ Training complete! Saving model as `deepfake_model.h5`")
-    model.save("deepfake_model.h5")
+    model.save("deepfake_model_v2.h5")
